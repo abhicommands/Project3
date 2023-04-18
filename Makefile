@@ -3,8 +3,8 @@ CC = gcc
 
 server: ttts.c
 	$(CC) $(CFLAGS) -o ttts ttts.c
-	mv ttts ../bin
+	mv ttts ./bin
 
 client: ttt.c
 	$(CC) -o ttt ttt.c
-	mv ttt ../bin
+	mv ttt ./bin
