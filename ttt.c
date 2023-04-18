@@ -1,74 +1,64 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
-
-int main() {
-    // Initialize the game board
-    char board[3][3] = {
-        {'.', '.', '.'},
-        {'.', '.', '.'},
-        {'.', '.', '.'}
-    };
-    
-    // Print the initial game board
-    printf("  1 2 3\n");
-    printf(" -------\n");
-    printf("1|%c|%c|%c|\n", board[0][0], board[0][1], board[0][2]);
-    printf(" -------\n");
-    printf("2|%c|%c|%c|\n", board[1][0], board[1][1], board[1][2]);
-    printf(" -------\n");
-    printf("3|%c|%c|%c|\n", board[2][0], board[2][1], board[2][2]);
-    printf(" -------\n");
-
-    // Start the game loop
-    int player = 1;
-    int row, col;
-    char mark;
-    int gameOver = 0;
-    while (!gameOver) {
-        // Get the player's move
-        printf("Player %d, enter row (1-3) and column (1-3) separated by a space: ", player);
-        scanf("%d %d", &row, &col);
-        row--;
-        col--;
-        
-        // Check if the move is valid
-        if (row < 0 || row > 2 || col < 0 || col > 2) {
-            printf("Invalid move. Row and column must be between 1 and 3.\n");
-            continue;
-        }
-        if (board[row][col] != '.') {
-            printf("Invalid move. Cell is already occupied.\n");
-            continue;
-        }
-        
-        // Update the game board
-        if (player == 1) {
-            mark = 'X';
-        } else {
-            mark = 'O';
-        }
-        board[row][col] = mark;
-        
-        // Print the updated game board
-        printf("  1 2 3\n");
-        printf(" -------\n");
-        printf("1|%c|%c|%c|\n", board[0][0], board[0][1], board[0][2]);
-        printf(" -------\n");
-        printf("2|%c|%c|%c|\n", board[1][0], board[1][1], board[1][2]);
-        printf(" -------\n");
-        printf("3|%c|%c|%c|\n", board[2][0], board[2][1], board[2][2]);
-        printf(" -------\n");
-        
-        // Check if the game is over
-        // TODO: add game over conditions here
-        
-        
-        // Switch to the other player
-        if (player == 1) {
-            player = 2;
-        } else {
-            player = 1;
-        }
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <string.h>
+int connect_inet(char *host, char *service)
+{
+    struct addrinfo hints, *info_list, *info;
+    int sock, error;
+    // look up remote host
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;     // in practice, this means give us IPv4 or IPv6
+    hints.ai_socktype = SOCK_STREAM; // indicate we want a streaming socket
+    error = getaddrinfo(host, service, &hints, &info_list);
+    if (error)
+    {
+        fprintf(stderr, "error looking up %s:%s: %s\n", host, service,
+                gai_strerror(error));
+        return -1;
     }
-    
-    return 0;
+    for (info = info_list; info != NULL; info = info->ai_next)
+    {
+        sock = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
+        if (sock < 0)
+            continue;
+        error = connect(sock, info->ai_addr, info->ai_addrlen);
+        if (error)
+        {
+            close(sock);
+            continue;
+        }
+        break;
+    }
+    freeaddrinfo(info_list);
+    if (info == NULL)
+    {
+        fprintf(stderr, "Unable to connect to %s:%s\n", host, service);
+        return -1;
+    }
+    return sock;
+}
+#define BUFLEN 256
+int main(int argc, char **argv)
+{
+    int sock, bytes;
+    char buf[BUFLEN];
+    if (argc != 3)
+    {
+        printf("Specify host and service\n");
+        exit(EXIT_FAILURE);
+    }
+    sock = connect_inet(argv[1], argv[2]);
+    if (sock < 0)
+        exit(EXIT_FAILURE);
+    while ((bytes = read(STDIN_FILENO, buf, BUFLEN)) > 0)
+    {
+        write(sock, buf, bytes);
+        // FIXME: should check whether the write succeeded!
+    }
+    close(sock);
+    return EXIT_SUCCESS;
 }
