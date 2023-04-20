@@ -39,6 +39,10 @@ struct connection_data
     socklen_t addr_len;
     int fd;
 };
+struct thread_data {
+    struct connection_data *client_a;
+    struct connection_data *client_b;
+};
 int open_listener(char *service, int queue_size)
 {
     struct addrinfo hint, *info_list, *info;
@@ -130,6 +134,72 @@ void *read_data(void *arg)
     free(con);
     return NULL;
 }
+void *chat_thread(void *arg)
+{
+    struct thread_data *data = (struct thread_data *)arg;
+    struct connection_data *client_a = data->client_a;
+    struct connection_data *client_b = data->client_b;
+    char buf[BUFSIZE + 1], host[HOSTSIZE], port[PORTSIZE];
+    int bytes, client1_err;
+    client1_err = getnameinfo(
+        (struct sockaddr *)&client_a->addr, client_a->addr_len,
+        host, HOSTSIZE,
+        port, PORTSIZE,
+        NI_NUMERICSERV);
+    if (client1_err)
+    {
+        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client1_err));
+        strcpy(host, "??");
+        strcpy(port, "??");
+    }
+    char buf2[BUFSIZE+1], host2[HOSTSIZE], port2[PORTSIZE];
+    int client2_err, bytes2;
+    client2_err = getnameinfo(
+        (struct sockaddr *)&client_b->addr, client_b->addr_len,
+        host2, HOSTSIZE,
+        port2, PORTSIZE,
+        NI_NUMERICSERV);
+    if (client2_err)
+    {
+        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client2_err));
+        strcpy(host2, "??");
+        strcpy(port2, "??");
+    }
+    printf("Connection from %s:%s\n", host2, port2);
+    while (active && ((bytes = read(client_a->fd, buf, BUFSIZE) > 0 ) || (bytes2 = read(client_b->fd, buf2, BUFSIZE) > 0)))
+    {
+        if(bytes > 0)
+        {
+            buf[bytes] = '\0';
+            printf("[%s:%s] read %d bytes |%s|\n", host, port, bytes, buf);
+            write(client_b->fd, buf, bytes);
+        }
+        if(bytes2 > 0)
+        {
+            buf2[bytes2] = '\0';
+            printf("[%s:%s] read %d bytes |%s|\n", host2, port2, bytes2, buf2);
+            write(client_a->fd, buf2, bytes2);
+        }
+    }
+    if (bytes == 0)
+    {
+        printf("[%s:%s] got EOF\n", host, port);
+        write(client_b->fd, "Client A has disconnected", 25);
+    }
+    else if (bytes == -1)
+    {
+        printf("[%s:%s] terminating: %s\n", host, port, strerror(errno));
+    }
+    else
+    {
+        printf("[%s:%s] terminating\n", host, port);
+    }
+    close(client_a->fd);
+    close(client_b->fd);
+    free(client_a);
+    free(client_b);
+    return NULL;
+}
 int main(int argc, char **argv)
 {
     sigset_t mask;
@@ -142,6 +212,11 @@ int main(int argc, char **argv)
     if (listener < 0)
         exit(EXIT_FAILURE);
     printf("Listening for incoming connections on %s\n", service);
+
+    // maintain a list of connected clients
+    struct connection_data *clients[QUEUE_SIZE];
+    int num_clients = 0;
+
     while (active)
     {
         con = (struct connection_data *)malloc(sizeof(struct connection_data));
@@ -165,16 +240,55 @@ int main(int argc, char **argv)
             fprintf(stderr, "sigmask: %s\n", strerror(error));
             exit(EXIT_FAILURE);
         }
-        error = pthread_create(&tid, NULL, read_data, con);
-        if (error != 0)
-        {
-            fprintf(stderr, "pthread_create: %s\n", strerror(error));
-            close(con->fd);
-            free(con);
-            continue;
+
+        // add the new client to the list
+        clients[num_clients++] = con;
+
+        // if there are two clients available, pair them and create a new thread
+        if (num_clients % 2 == 0) {
+            struct connection_data *client_a = clients[num_clients-2];
+            struct connection_data *client_b = clients[num_clients-1];
+
+            // create a new thread for the client pair
+            struct thread_data *thread_data = malloc(sizeof(struct thread_data));
+            thread_data->client_a = client_a;
+            thread_data->client_b = client_b;
+            printf("Creating new thread for client pair\n");
+            error = pthread_create(&tid, NULL, chat_thread, thread_data);
+            if (error != 0)
+            {
+                fprintf(stderr, "pthread_create: %s\n", strerror(error));
+                close(client_a->fd);
+                close(client_b->fd);
+                free(client_a);
+                free(client_b);
+                free(thread_data);
+                continue;
+            }
+
+            // remove the clients from the list
+            clients[num_clients-2] = NULL;
+            clients[num_clients-1] = NULL;
+            num_clients -= 2;
+
+            // automatically clean up the thread once it terminates
+            pthread_detach(tid);
+        } else {
+            // create a new thread for the client
+            printf("Only 1 client joined)\n");
+            error = pthread_create(&tid, NULL, read_data, con);
+            if (error != 0)
+            {
+                fprintf(stderr, "pthread_create: %s\n", strerror(error));
+                close(con->fd);
+                free(con);
+                continue;
+            }
+
+            // automatically clean up the thread once it terminates
+            pthread_detach(tid);
         }
-        // automatically clean up child threads once they terminate
-        pthread_detach(tid);
+
         // unblock handled signals
         error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
         if (error != 0)
@@ -183,18 +297,14 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
     }
+
+    // clean up any remaining clients
+    for (int i = 0; i < num_clients; i++) {
+        close(clients[i]->fd);
+        free(clients[i]);
+    }
+
     puts("Shutting down");
     close(listener);
-    // returning from main() (or calling exit()) immediately terminates all
-    // remaining threads
-    // to allow threads to run to completion, we can terminate the primary thread
-    // without calling exit() or returning from main:
-    // pthread_exit(NULL);
-    // child threads will terminate once they check the value of active, but
-    // there is a risk that read() will block indefinitely, preventing the
-    // thread (and process) from terminating
-    // to get a timely shut-down of all threads, including those blocked by
-    // read(), we will could maintain a global list of all active thread IDs
-    // and use pthread_cancel() or pthread_kill() to wake each one
     return EXIT_SUCCESS;
 }
