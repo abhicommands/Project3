@@ -11,6 +11,8 @@
 #include <signal.h>
 #include <pthread.h>
 #include <errno.h>
+#include <sys/select.h>
+
 #define QUEUE_SIZE 8
 volatile int active = 1;
 void handler(int signum)
@@ -39,7 +41,8 @@ struct connection_data
     socklen_t addr_len;
     int fd;
 };
-struct thread_data {
+struct thread_data
+{
     struct connection_data *client_a;
     struct connection_data *client_b;
 };
@@ -139,61 +142,105 @@ void *chat_thread(void *arg)
     struct thread_data *data = (struct thread_data *)arg;
     struct connection_data *client_a = data->client_a;
     struct connection_data *client_b = data->client_b;
-    char buf[BUFSIZE + 1], host[HOSTSIZE], port[PORTSIZE];
-    int bytes, client1_err;
-    client1_err = getnameinfo(
+    char buf[BUFSIZE + 1], host_a[HOSTSIZE], port_a[PORTSIZE], host_b[HOSTSIZE], port_b[PORTSIZE];
+    int bytes_a, bytes_b, client_a_err, client_b_err;
+    client_a_err = getnameinfo(
         (struct sockaddr *)&client_a->addr, client_a->addr_len,
-        host, HOSTSIZE,
-        port, PORTSIZE,
+        host_a, HOSTSIZE,
+        port_a, PORTSIZE,
         NI_NUMERICSERV);
-    if (client1_err)
+    if (client_a_err)
     {
-        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client1_err));
-        strcpy(host, "??");
-        strcpy(port, "??");
+        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client_a_err));
+        strcpy(host_a, "??");
+        strcpy(port_a, "??");
     }
-    char buf2[BUFSIZE+1], host2[HOSTSIZE], port2[PORTSIZE];
-    int client2_err, bytes2;
-    client2_err = getnameinfo(
+    client_b_err = getnameinfo(
         (struct sockaddr *)&client_b->addr, client_b->addr_len,
-        host2, HOSTSIZE,
-        port2, PORTSIZE,
+        host_b, HOSTSIZE,
+        port_b, PORTSIZE,
         NI_NUMERICSERV);
-    if (client2_err)
+    if (client_b_err)
     {
-        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client2_err));
-        strcpy(host2, "??");
-        strcpy(port2, "??");
+        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(client_b_err));
+        strcpy(host_b, "??");
+        strcpy(port_b, "??");
     }
-    printf("Connection from %s:%s\n", host2, port2);
-    while (active && ((bytes = read(client_a->fd, buf, BUFSIZE) > 0 ) || (bytes2 = read(client_b->fd, buf2, BUFSIZE) > 0)))
+    fd_set read_fds, write_fds;
+    FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
+    FD_SET(client_a->fd, &read_fds);
+    FD_SET(client_b->fd, &read_fds);
+    int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
+    while (active)
     {
-        if(bytes > 0)
+        fd_set tmp_read_fds = read_fds;
+        fd_set tmp_write_fds = write_fds;
+        int num_ready = select(max_fd + 1, &tmp_read_fds, &tmp_write_fds, NULL, NULL);
+        if (num_ready == -1)
         {
-            buf[bytes] = '\0';
-            printf("[%s:%s] read %d bytes |%s|\n", host, port, bytes, buf);
-            write(client_b->fd, buf, bytes);
+            fprintf(stderr, "select: %s\n", strerror(errno));
+            break;
         }
-        if(bytes2 > 0)
+        // Check for data to read from client A
+        if (FD_ISSET(client_a->fd, &tmp_read_fds))
         {
-            buf2[bytes2] = '\0';
-            printf("[%s:%s] read %d bytes |%s|\n", host2, port2, bytes2, buf2);
-            write(client_a->fd, buf2, bytes2);
+            bytes_a = read(client_a->fd, buf, BUFSIZE);
+            if (bytes_a == -1)
+            {
+                fprintf(stderr, "[%s:%s] read: %s\n", host_a, port_a, strerror(errno));
+                break;
+            }
+            if (bytes_a == 0)
+            {
+                printf("Closing connection between [%s:%s] and [%s:%s]\n", host_a, port_a, host_b, port_b);
+                FD_CLR(client_a->fd, &read_fds);
+                FD_CLR(client_b->fd, &write_fds);
+                break;
+            }
+            buf[bytes_a] = '\0';
+            printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
+            // Send message from client A to client B
+            bytes_b = write(client_b->fd, buf, bytes_a);
+            if (bytes_b == -1)
+            {
+                fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
+                break;
+            }
+            FD_CLR(client_a->fd, &read_fds);
+            FD_SET(client_b->fd, &write_fds);
+        }
+
+        // Check for data to read from client B
+        if (FD_ISSET(client_b->fd, &tmp_read_fds))
+        {
+            bytes_b = read(client_b->fd, buf, BUFSIZE);
+            if (bytes_b == -1)
+            {
+                fprintf(stderr, "[%s:%s] read: %s\n", host_b, port_b, strerror(errno));
+                break;
+            }
+            if (bytes_b == 0)
+            {
+                printf("Closing connection between [%s:%s] and [%s:%s]\n", host_a, port_a, host_b, port_b);
+                FD_CLR(client_b->fd, &read_fds);
+                FD_CLR(client_a->fd, &write_fds);
+                break;
+            }
+            buf[bytes_b] = '\0';
+            printf("[%s:%s] read %d bytes |%s|\n", host_b, port_b, bytes_b, buf);
+            // Send message from client B to client A
+            bytes_a = write(client_a->fd, buf, bytes_b);
+            if (bytes_a == -1)
+            {
+                fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
+                break;
+            }
+            FD_CLR(client_b->fd, &read_fds);
+            FD_SET(client_a->fd, &write_fds);
         }
     }
-    if (bytes == 0)
-    {
-        printf("[%s:%s] got EOF\n", host, port);
-        write(client_b->fd, "Client A has disconnected", 25);
-    }
-    else if (bytes == -1)
-    {
-        printf("[%s:%s] terminating: %s\n", host, port, strerror(errno));
-    }
-    else
-    {
-        printf("[%s:%s] terminating\n", host, port);
-    }
+
     close(client_a->fd);
     close(client_b->fd);
     free(client_a);
@@ -245,9 +292,10 @@ int main(int argc, char **argv)
         clients[num_clients++] = con;
 
         // if there are two clients available, pair them and create a new thread
-        if (num_clients % 2 == 0) {
-            struct connection_data *client_a = clients[num_clients-2];
-            struct connection_data *client_b = clients[num_clients-1];
+        if (num_clients % 2 == 0)
+        {
+            struct connection_data *client_a = clients[num_clients - 2];
+            struct connection_data *client_b = clients[num_clients - 1];
 
             // create a new thread for the client pair
             struct thread_data *thread_data = malloc(sizeof(struct thread_data));
@@ -267,39 +315,25 @@ int main(int argc, char **argv)
             }
 
             // remove the clients from the list
-            clients[num_clients-2] = NULL;
-            clients[num_clients-1] = NULL;
+            clients[num_clients - 2] = NULL;
+            clients[num_clients - 1] = NULL;
             num_clients -= 2;
 
             // automatically clean up the thread once it terminates
             pthread_detach(tid);
-        } else {
-            // create a new thread for the client
-            printf("Only 1 client joined)\n");
-            error = pthread_create(&tid, NULL, read_data, con);
+            // unblock handled signals
+            error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
             if (error != 0)
             {
-                fprintf(stderr, "pthread_create: %s\n", strerror(error));
-                close(con->fd);
-                free(con);
-                continue;
+                fprintf(stderr, "sigmask: %s\n", strerror(error));
+                exit(EXIT_FAILURE);
             }
-
-            // automatically clean up the thread once it terminates
-            pthread_detach(tid);
-        }
-
-        // unblock handled signals
-        error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-        if (error != 0)
-        {
-            fprintf(stderr, "sigmask: %s\n", strerror(error));
-            exit(EXIT_FAILURE);
         }
     }
 
     // clean up any remaining clients
-    for (int i = 0; i < num_clients; i++) {
+    for (int i = 0; i < num_clients; i++)
+    {
         close(clients[i]->fd);
         free(clients[i]);
     }
