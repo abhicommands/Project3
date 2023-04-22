@@ -200,19 +200,25 @@ void *chat_thread(void *arg)
             }
             buf[bytes_a] = '\0';
             printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
-            // Send message from client A to client B
+            // Send message from client A to client B and client A
             bytes_b = write(client_b->fd, buf, bytes_a);
             if (bytes_b == -1)
             {
                 fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
                 break;
             }
-            FD_CLR(client_a->fd, &read_fds);
-            FD_SET(client_b->fd, &write_fds);
+            bytes_a = write(client_a->fd, buf, bytes_a); // added line to send message back to client A
+            if (bytes_a == -1)
+            {
+                fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
+                break;
+            }
+            //FD_CLR(client_a->fd, &read_fds);
+            FD_SET(client_b->fd, &write_fds); 
         }
 
         // Check for data to read from client B
-        if (FD_ISSET(client_b->fd, &tmp_read_fds))
+        if (FD_ISSET(client_b->fd, &tmp_read_fds)) 
         {
             bytes_b = read(client_b->fd, buf, BUFSIZE);
             if (bytes_b == -1)
@@ -236,7 +242,13 @@ void *chat_thread(void *arg)
                 fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
                 break;
             }
-            FD_CLR(client_b->fd, &read_fds);
+            bytes_b = write(client_b->fd, buf, bytes_b); // added line to send message back to client B
+            if (bytes_b == -1)
+            {
+                fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
+                break;
+            }
+            //FD_CLR(client_b->fd, &read_fds); 
             FD_SET(client_a->fd, &write_fds);
         }
     }
