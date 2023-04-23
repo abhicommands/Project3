@@ -18,6 +18,7 @@
 volatile int active = 1;
 int num_active = 0;
 int num_clients = 0;
+int * gameBoard;
 void handler(int signum)
 {
     active = 0;
@@ -45,6 +46,7 @@ struct connection_data
     int fd;
     char *name;
     bool active;
+    int role;
 };
 struct connection_data *clients[QUEUE_SIZE];
 struct thread_data
@@ -101,6 +103,57 @@ int open_listener(char *service, int queue_size)
     }
     return sock;
 }
+
+// initialize game board
+void initBoard()
+{
+    gameBoard = malloc(9 * sizeof(char));
+    for (int i = 0; i < 9; i++)
+    {
+        gameBoard[i] = '.';
+    }
+}
+
+// make a function that checks if the game is over
+char gameOver() // returns 'X', 'O', 'T', or '.' if game is not over
+{
+    // check rows
+    for (int i = 0; i < 9; i += 3)
+    {
+        if (gameBoard[i] != '.' && gameBoard[i] == gameBoard[i + 1] && gameBoard[i + 1] == gameBoard[i + 2])
+        {
+            return gameBoard[i];
+        }
+    }
+    // check columns
+    for (int i = 0; i < 3; i++)
+    {
+        if (gameBoard[i] != '.' && gameBoard[i] == gameBoard[i + 3] && gameBoard[i + 3] == gameBoard[i + 6])
+        {
+            return gameBoard[i];
+        }
+    }
+    // check diagonals
+    if (gameBoard[0] != '.' && gameBoard[0] == gameBoard[4] && gameBoard[4] == gameBoard[8])
+    {
+        return gameBoard[0];
+    }
+    if (gameBoard[2] != '.' && gameBoard[2] == gameBoard[4] && gameBoard[4] == gameBoard[6])
+    {
+        return gameBoard[2];
+    }
+    // check if board is full
+    for (int i = 0; i < 9; i++)
+    {
+        if (gameBoard[i] != '.')
+        {
+            return 'T';
+        }
+    }
+    return '.';
+}
+
+
 #define BUFSIZE 256
 #define HOSTSIZE 100
 #define PORTSIZE 10
@@ -137,14 +190,44 @@ void *game(void *arg)
     fd_set read_fds, write_fds;
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
+    FD_SET(client_a->fd, &write_fds);
+    FD_SET(client_b->fd, &write_fds);
+
+    int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
+    // send (BEGN|numOfBytes|player's Role| client name) to both clients
+    char *msgA = malloc(100);
+    int len = strlen(client_b->name) + 1 + 1 + 1 + 1;
+    char role;
+    if (client_a->role == 1)
+        role = 'X';
+    else
+        role = 'O';
+    sprintf(msgA, "BEGN|%d|%c|%s|\n", len, role, client_b->name);
+    bytes_a = write(client_a->fd, msgA, strlen(msgA));
+    if (bytes_a == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
+    {
+        fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
+    }
+    free(msgA);
+
+    char *msgB = malloc(100);
+    len = strlen(client_a->name) + 1 + 1 + 1 + 1;
+    if (client_b->role == 1)
+        role = 'X';
+    else
+        role = 'O';
+    sprintf(msgB, "BEGN|%d|%c|%s|\n", len, role, client_a->name);
+    bytes_b = write(client_b->fd, msgB, strlen(msgB));
+    if (bytes_b == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
+    {
+        fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
+    }
+    free(msgB);
+
     FD_SET(client_a->fd, &read_fds);
     FD_SET(client_b->fd, &read_fds);
-    int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
     // print the connection information
     printf("Game started between %s:%s and %s:%s\n", host_a, port_a, host_b, port_b);
-    // print player a name
-    printf("Player A: %s\n", client_a->name);
-    printf("Player B: %s\n", client_b->name);
     while (active)
     {
         fd_set tmp_read_fds = read_fds;
@@ -155,6 +238,7 @@ void *game(void *arg)
             fprintf(stderr, "select: %s\n", strerror(errno));
             break;
         }
+
         // Check for data to read from client A
         if (FD_ISSET(client_a->fd, &tmp_read_fds))
         {
@@ -287,6 +371,9 @@ void *read_data(void *arg)
                 // create a new thread for the client pair
                 // print names of clinets
                 printf("Client A: %s Client B: %s \n", client_a->name, client_b->name);
+                // make the client A's role "X" which is 1 and client B's role "O" which is 2
+                client_a->role = 1;
+                client_b->role = 2;
                 struct thread_data *thread_data = malloc(sizeof(struct thread_data));
                 thread_data->client_a = client_a;
                 thread_data->client_b = client_b;
