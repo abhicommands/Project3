@@ -1,4 +1,4 @@
-CFLAGS = -pthread
+CFLAGS = -pthread -g -std=c99 -Wall -fsanitize=address,undefined
 CC = gcc
 
 server: ttts.c

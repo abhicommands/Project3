@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -15,6 +16,8 @@
 
 #define QUEUE_SIZE 8
 volatile int active = 1;
+int num_active = 0;
+int num_clients = 0;
 void handler(int signum)
 {
     active = 0;
@@ -41,7 +44,9 @@ struct connection_data
     socklen_t addr_len;
     int fd;
     char *name;
+    bool active;
 };
+struct connection_data *clients[QUEUE_SIZE];
 struct thread_data
 {
     struct connection_data *client_a;
@@ -99,76 +104,14 @@ int open_listener(char *service, int queue_size)
 #define BUFSIZE 256
 #define HOSTSIZE 100
 #define PORTSIZE 10
-void *read_data(void *arg)
-{
-    struct connection_data *con = arg;
-    char buf[BUFSIZE + 1], host[HOSTSIZE], port[PORTSIZE];
-    int bytes, error;
-    error = getnameinfo(
-        (struct sockaddr *)&con->addr, con->addr_len,
-        host, HOSTSIZE,
-        port, PORTSIZE,
-        NI_NUMERICSERV);
-    if (error)
-    {
-        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(error));
-        strcpy(host, "??");
-        strcpy(port, "??");
-    }
-    printf("Connection from %s:%s\n", host, port);
-    while (active && (bytes = read(con->fd, buf, BUFSIZE)) > 0)
-    {
-        buf[bytes] = '\0';
-        printf("[%s:%s] read %d bytes |%s|\n", host, port, bytes, buf);
-        // if player sends "PLAY|10|Joe Smith|" and the first 4 characters are "PLAY" then, send "NAME|10|Joe Smith|\n" and in next line send "WAIT|0|\n" to player
-        if (strncmp(buf, "PLAY", 4) == 0)
-        {
-            //send "NAME|(num_bytes)|(given name)|\n"
-            char *name = strtok(buf, "|");
-            name = strtok(NULL, "|");
-            name = strtok(NULL, "|");
-            char *num_bytes = malloc(sizeof(char) * 10);
-            sprintf(num_bytes, "%ld", strlen(name) + 1);
-            char *send_name = malloc(sizeof(char) * (strlen(num_bytes) + strlen(name) + 10));
-            strcpy(send_name, "NAME|");
-            strcat(send_name, num_bytes);
-            strcat(send_name, "|");
-            strcat(send_name, name);
-            strcat(send_name, "|\n");
-            write(con->fd, send_name, strlen(send_name));
-            printf("sent: %s", send_name);
-            //send "WAIT|0|\n"
-            write(con->fd, "WAIT|0|\n", 8);
-            // name assign to connection
-            con->name = name;
-            return NULL;
-        } else {
-            write(con->fd, "EROR|0|\n", 8);
-        }
-    }
-    if (bytes == 0)
-    {
-        printf("[%s:%s] got EOF\n", host, port);
-    }
-    else if (bytes == -1)
-    {
-        printf("[%s:%s] terminating: %s\n", host, port, strerror(errno));
-    }
-    else
-    {
-        printf("[%s:%s] terminating\n", host, port);
-    }
-    close(con->fd);
-    free(con);
-    return NULL;
-}
 void *game(void *arg)
 {
-    struct thread_data *data = (struct thread_data *)arg;
+    struct thread_data *data = arg;
     struct connection_data *client_a = data->client_a;
     struct connection_data *client_b = data->client_b;
     char buf[BUFSIZE + 1], host_a[HOSTSIZE], port_a[PORTSIZE], host_b[HOSTSIZE], port_b[PORTSIZE];
     int bytes_a, bytes_b, client_a_err, client_b_err;
+    printf("Game started between %s and %s\n", client_a->name, client_b->name);
     client_a_err = getnameinfo(
         (struct sockaddr *)&client_a->addr, client_a->addr_len,
         host_a, HOSTSIZE,
@@ -199,8 +142,9 @@ void *game(void *arg)
     int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
     // print the connection information
     printf("Game started between %s:%s and %s:%s\n", host_a, port_a, host_b, port_b);
-    //print player a name
+    // print player a name
     printf("Player A: %s\n", client_a->name);
+    printf("Player B: %s\n", client_b->name);
     while (active)
     {
         fd_set tmp_read_fds = read_fds;
@@ -288,6 +232,117 @@ void *game(void *arg)
     free(client_b);
     return NULL;
 }
+void *read_data(void *arg)
+{
+    struct connection_data *con = arg;
+    char buf[BUFSIZE + 1], host[HOSTSIZE], port[PORTSIZE];
+    int bytes, error;
+    error = getnameinfo(
+        (struct sockaddr *)&con->addr, con->addr_len,
+        host, HOSTSIZE,
+        port, PORTSIZE,
+        NI_NUMERICSERV);
+    if (error)
+    {
+        fprintf(stderr, "getnameinfo: %s\n", gai_strerror(error));
+        strcpy(host, "??");
+        strcpy(port, "??");
+    }
+    printf("Connection from %s:%s\n", host, port);
+    while (active && (bytes = read(con->fd, buf, BUFSIZE)) > 0)
+    {
+        buf[bytes] = '\0';
+        printf("[%s:%s] read %d bytes |%s|\n", host, port, bytes, buf);
+        // if player sends "PLAY|10|Joe Smith|" and the first 4 characters are "PLAY" then, send "NAME|10|Joe Smith|\n" and in next line send "WAIT|0|\n" to player
+        if (strncmp(buf, "PLAY", 4) == 0)
+        {
+            // send "NAME|(num_bytes)|(given name)|\n"
+            char *name = strtok(buf, "|");
+            name = strtok(NULL, "|");
+            name = strtok(NULL, "|");
+            char *num_bytes = malloc(sizeof(char) * 10);
+            sprintf(num_bytes, "%ld", strlen(name) + 1);
+            char *send_name = malloc(sizeof(char) * (strlen(num_bytes) + strlen(name) + 10));
+            strcpy(send_name, "NAME|");
+            strcat(send_name, num_bytes);
+            strcat(send_name, "|");
+            strcat(send_name, name);
+            strcat(send_name, "|\n");
+            write(con->fd, send_name, strlen(send_name));
+            free(num_bytes);
+            free(send_name);
+            write(con->fd, "WAIT|0|\n", 8);
+            con->active = true;
+            num_active++;
+            // name assign to connection
+            con->name = name;
+            if (num_active > 0 && (num_active % 2 == 0))
+            {
+
+                pthread_t tid;
+                int error;
+                sigset_t mask;
+                struct connection_data *client_a = clients[num_clients - 2];
+                struct connection_data *client_b = clients[num_clients - 1];
+                // create a new thread for the client pair
+                // print names of clinets
+                printf("Client A: %s Client B: %s \n", client_a->name, client_b->name);
+                struct thread_data *thread_data = malloc(sizeof(struct thread_data));
+                thread_data->client_a = client_a;
+                thread_data->client_b = client_b;
+                printf("Creating new thread for client pair\n");
+                error = pthread_create(&tid, NULL, game, thread_data);
+                if (error != 0)
+                {
+                    fprintf(stderr, "pthread_create: %s\n", strerror(error));
+                    close(client_a->fd);
+                    close(client_b->fd);
+                    free(client_a);
+                    free(client_b);
+                    free(thread_data);
+                    continue;
+                }
+
+                // remove the clients from the list
+                clients[num_clients - 2] = NULL;
+                clients[num_clients - 1] = NULL;
+                num_clients -= 2;
+
+                // automatically clean up the thread once it terminates
+                pthread_detach(tid);
+                free(thread_data);
+                // unblock handled signals
+                error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+                if (error != 0)
+                {
+                    fprintf(stderr, "sigmask: %s\n", strerror(error));
+                    exit(EXIT_FAILURE);
+                }
+            }
+            return NULL;
+        }
+        else
+        {
+            write(con->fd, "EROR|0|\n", 8);
+        }
+    }
+    if (bytes == 0)
+    {
+        printf("[%s:%s] got EOF\n", host, port);
+    }
+    else if (bytes == -1)
+    {
+        printf("[%s:%s] terminating: %s\n", host, port, strerror(errno));
+    }
+    else
+    {
+        printf("[%s:%s] terminating\n", host, port);
+    }
+    close(con->fd);
+    free(con);
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     sigset_t mask;
@@ -302,8 +357,6 @@ int main(int argc, char **argv)
     printf("Listening for incoming connections on %s\n", service);
 
     // maintain a list of connected clients
-    struct connection_data *clients[QUEUE_SIZE];
-    int num_clients = 0;
 
     while (active)
     {
@@ -329,70 +382,27 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
 
-        // add the new client to the list
+        // add the client to the linked list
         clients[num_clients++] = con;
-
-        // if there are two clients available, pair them and create a new thread
-        if (num_clients % 2 == 0)
+        error = pthread_create(&tid, NULL, read_data, con);
+        if (error != 0)
         {
-            struct connection_data *client_a = clients[num_clients - 2];
-            struct connection_data *client_b = clients[num_clients - 1];
-
-            // create a new thread for the client pair
-            struct thread_data *thread_data = malloc(sizeof(struct thread_data));
-            thread_data->client_a = client_a;
-            thread_data->client_b = client_b;
-            printf("Creating new thread for client pair\n");
-            error = pthread_create(&tid, NULL, game, thread_data);
-            if (error != 0)
-            {
-                fprintf(stderr, "pthread_create: %s\n", strerror(error));
-                close(client_a->fd);
-                close(client_b->fd);
-                free(client_a);
-                free(client_b);
-                free(thread_data);
-                continue;
-            }
-
-            // remove the clients from the list
-            clients[num_clients - 2] = NULL;
-            clients[num_clients - 1] = NULL;
-            num_clients -= 2;
-
-            // automatically clean up the thread once it terminates
-            pthread_detach(tid);
-            // unblock handled signals
-            error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-            if (error != 0)
-            {
-                fprintf(stderr, "sigmask: %s\n", strerror(error));
-                exit(EXIT_FAILURE);
-            }
+            fprintf(stderr, "pthread_create: %s\n", strerror(error));
+            close(con->fd);
+            free(con);
+            continue;
         }
-        else
-        { // if there is only one client, wait for another to connect by sending the client to read_data function
-
-            error = pthread_create(&tid, NULL, read_data, con);
-            if (error != 0)
-            {
-                fprintf(stderr, "pthread_create: %s\n", strerror(error));
-                close(con->fd);
-                free(con);
-                continue;
-            }
-
-
-            // unblock handled signals
-            error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-            if (error != 0)
-            {
-                fprintf(stderr, "sigmask: %s\n", strerror(error));
-                exit(EXIT_FAILURE);
-            }
+        // unblock handled signals
+        // automatically clean up child threads once they terminate
+        pthread_detach(tid);
+        // unblock handled signals
+        error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+        if (error != 0)
+        {
+            fprintf(stderr, "sigmask: %s\n", strerror(error));
+            exit(EXIT_FAILURE);
         }
     }
-
     // clean up any remaining clients
     for (int i = 0; i < num_clients; i++)
     {
