@@ -15,6 +15,7 @@
 #include <sys/select.h>
 
 #define QUEUE_SIZE 8
+#define MAX_CLIENTS 16
 volatile int active = 1;
 int num_active = 0;
 int num_clients = 0;
@@ -48,7 +49,7 @@ struct connection_data
     bool active;
     int role;
 };
-struct connection_data *clients[QUEUE_SIZE];
+struct connection_data *clients[MAX_CLIENTS];
 struct thread_data
 {
     struct connection_data *client_a;
@@ -166,15 +167,20 @@ void *game(void *arg)
     // free the old clients and set the new ones
     struct connection_data *client_a = malloc(sizeof(struct connection_data));
     struct connection_data *client_b = malloc(sizeof(struct connection_data));
+    char *name_a = malloc(strlen(old_client_a->name) + 1);
+    char *name_b = malloc(strlen(old_client_b->name) + 1);
+    strcpy(name_a, old_client_a->name);
+    strcpy(name_b, old_client_b->name);
     memcpy(client_a, old_client_a, sizeof(struct connection_data));
     memcpy(client_b, old_client_b, sizeof(struct connection_data));
+    free(old_client_a->name);
+    free(old_client_b->name);
     free(old_client_a);
     free(old_client_b);
     free(data);
 
     char buf[BUFSIZE + 1], host_a[HOSTSIZE], port_a[PORTSIZE], host_b[HOSTSIZE], port_b[PORTSIZE];
     int bytes_a, bytes_b, client_a_err, client_b_err;
-    printf("Game started between %s and %s\n", client_a->name, client_b->name);
     client_a_err = getnameinfo(
         (struct sockaddr *)&client_a->addr, client_a->addr_len,
         host_a, HOSTSIZE,
@@ -206,13 +212,13 @@ void *game(void *arg)
     int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
     // send (BEGN|numOfBytes|player's Role| client name) to both clients
     char *msgA = malloc(100);
-    int len = strlen(client_b->name) + 1 + 1 + 1 + 1;
+    int len = strlen(name_b) + 1 + 1 + 1 ;
     char role;
     if (client_a->role == 1)
         role = 'X';
     else
         role = 'O';
-    sprintf(msgA, "BEGN|%d|%c|%s|\n", len, role, client_b->name);
+    sprintf(msgA, "BEGN|%d|%c|%s|\n", len, role, name_b);
     bytes_a = write(client_a->fd, msgA, strlen(msgA));
     if (bytes_a == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
     {
@@ -221,12 +227,12 @@ void *game(void *arg)
     free(msgA);
 
     char *msgB = malloc(100);
-    len = strlen(client_a->name) + 1 + 1 + 1 + 1;
+    len = strlen(name_a) + 1 + 1 + 1;
     if (client_b->role == 1)
         role = 'X';
     else
         role = 'O';
-    sprintf(msgB, "BEGN|%d|%c|%s|\n", len, role, client_a->name);
+    sprintf(msgB, "BEGN|%d|%c|%s|\n", len, role, name_a);
     bytes_b = write(client_b->fd, msgB, strlen(msgB));
     if (bytes_b == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
     {
@@ -322,9 +328,43 @@ void *game(void *arg)
 
     close(client_a->fd);
     close(client_b->fd);
+    free(name_a);
+    free(name_b);
     free(client_a);
     free(client_b);
     return NULL;
+}
+// find the first pair of indexes of clients that are active 
+int * find_pair(struct connection_data *clients[], int num_clients)
+{
+    int *pair = malloc(2 * sizeof(int));
+    int i, j;
+    for (i = 0; i < num_clients; i++)
+    {
+        if ((clients[i])->active)
+        {
+            for (j = i + 1; j < num_clients; j++)
+            {
+                if ((clients[j])->active)
+                {
+                    pair[0] = i;
+                    pair[1] = j;
+                    return pair;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+// removes the given index of the client array and shifts the rest of the array 
+void remove_client(struct connection_data **clients, int num_clients, int index)
+{
+    int i;
+    for (i = index; i < num_clients - 1; i++)
+    {
+        clients[i] = clients[i + 1];
+    }
+    clients[num_clients - 1] = NULL;
 }
 void *read_data(void *arg)
 {
@@ -357,15 +397,18 @@ void *read_data(void *arg)
             write(con->fd, "WAIT|0|\n", 8);
             con->active = true;
             num_active++;
-            con->name = name;
+            con->name = malloc(strlen(name) + 1);
+            con->name = strcpy(con->name, name);
             if (num_active > 0 && (num_active % 2 == 0))
             {
 
                 pthread_t tid;
                 int error;
                 sigset_t mask;
-                struct connection_data *client_a = clients[num_clients - 2];
-                struct connection_data *client_b = clients[num_clients - 1];
+                //find the pair of clients that are active
+                int *pair = find_pair(clients, num_clients);
+                struct connection_data *client_a = clients[pair[0]];
+                struct connection_data *client_b = clients[pair[1]];
                 // create a new thread for the client pair
                 // make the client A's role "X" which is 1 and client B's role "O" which is 2
                 client_a->role = 1;
@@ -374,6 +417,12 @@ void *read_data(void *arg)
                 thread_data->client_a = client_a;
                 thread_data->client_b = client_b;
                 printf("Creating new thread for client pair\n");
+                // remove the clients from the list
+                remove_client(clients, num_clients, pair[0]);
+                remove_client(clients, num_clients, pair[1]);
+                num_clients -= 2;
+                num_active -= 2;
+                free(pair);
                 error = pthread_create(&tid, NULL, game, thread_data);
                 if (error != 0)
                 {
@@ -386,10 +435,7 @@ void *read_data(void *arg)
                     continue;
                 }
 
-                // remove the clients from the list
-                clients[num_clients - 2] = NULL;
-                clients[num_clients - 1] = NULL;
-                num_clients -= 2;
+                
 
                 // automatically clean up the thread once it terminates
                 pthread_detach(tid);
