@@ -44,7 +44,7 @@ struct connection_data
     struct sockaddr_storage addr;
     socklen_t addr_len;
     int fd;
-    char *name;
+    char name[128];
     int active;
     int role;
 };
@@ -166,17 +166,14 @@ void *game(void *arg)
     // free the old clients and set the new ones
     struct connection_data *client_a = malloc(sizeof(struct connection_data));
     struct connection_data *client_b = malloc(sizeof(struct connection_data));
-    char *name_a = malloc(strlen(old_client_a->name) + 1);
-    char *name_b = malloc(strlen(old_client_b->name) + 1);
-    strcpy(name_a, old_client_a->name);
-    strcpy(name_b, old_client_b->name);
     memcpy(client_a, old_client_a, sizeof(struct connection_data));
     memcpy(client_b, old_client_b, sizeof(struct connection_data));
-    free(old_client_a->name);
-    free(old_client_b->name);
     free(old_client_a);
     free(old_client_b);
     free(data);
+    char name_a[128], name_b[128];
+    strcpy(name_a, client_a->name);
+    strcpy(name_b, client_b->name);
 
     char buf[BUFSIZE + 1], host_a[HOSTSIZE], port_a[PORTSIZE], host_b[HOSTSIZE], port_b[PORTSIZE];
     int bytes_a, bytes_b, client_a_err, client_b_err;
@@ -327,8 +324,6 @@ void *game(void *arg)
 
     close(client_a->fd);
     close(client_b->fd);
-    free(name_a);
-    free(name_b);
     free(client_a);
     free(client_b);
     return NULL;
@@ -387,7 +382,6 @@ void *read_data(void *arg)
             write(con->fd, "WAIT|0|\n", 8);
             con->active = 1;
             num_active++;
-            con->name = malloc(strlen(name) + 1);
             strcpy(con->name, name);
             if (num_active > 0 && (num_active % 2 == 0))
             {
@@ -405,14 +399,8 @@ void *read_data(void *arg)
                 (clients[pair[1]])->active = 0;
                 struct connection_data *client_a = malloc(sizeof(struct connection_data));
                 struct connection_data *client_b = malloc(sizeof(struct connection_data));
-                char *name_a = malloc(strlen((clients[pair[0]])->name) + 1);
-                char *name_b = malloc(strlen((clients[pair[1]])->name) + 1);
-                strcpy(name_a, (clients[pair[0]])->name);
-                strcpy(name_b, (clients[pair[1]])->name);
                 memcpy(client_a, clients[pair[0]], sizeof(struct connection_data));
                 memcpy(client_b, clients[pair[1]], sizeof(struct connection_data));
-                client_a->name = name_a;
-                client_b->name = name_b;
                 struct thread_data *thread_data = malloc(sizeof(struct thread_data));
                 thread_data->client_a = client_a;
                 thread_data->client_b = client_b;
@@ -526,11 +514,8 @@ int main(int argc, char **argv)
     // free the list of clients
     for (int i = 0; i < num_clients; i++)
     {
-        if(clients[i]->name != NULL)
-        {
-            free(clients[i]->name);
-            free(clients[i]);
-        }
+        close(clients[i]->fd);
+        free(clients[i]);
     }
     puts("Shutting down");
     close(listener);

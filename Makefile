@@ -6,5 +6,5 @@ server: ttts.c
 	mv ttts ./bin
 
 client: ttt.c
-	$(CC) -o ttt ttt.c
+	$(CC) $(CFLAGS) -o ttt ttt.c
 	mv ttt ./bin
