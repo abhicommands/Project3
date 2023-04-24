@@ -2,7 +2,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -46,7 +45,7 @@ struct connection_data
     socklen_t addr_len;
     int fd;
     char *name;
-    bool active;
+    int active;
     int role;
 };
 struct connection_data *clients[MAX_CLIENTS];
@@ -341,11 +340,11 @@ int * find_pair(struct connection_data *clients[], int num_clients)
     int i, j;
     for (i = 0; i < num_clients; i++)
     {
-        if ((clients[i])->active)
+        if ((clients[i])->active == 1)
         {
             for (j = i + 1; j < num_clients; j++)
             {
-                if ((clients[j])->active)
+                if ((clients[j])->active == 1)
                 {
                     pair[0] = i;
                     pair[1] = j;
@@ -357,15 +356,6 @@ int * find_pair(struct connection_data *clients[], int num_clients)
     return NULL;
 }
 // removes the given index of the client array and shifts the rest of the array 
-void remove_client(struct connection_data **clients, int num_clients, int index)
-{
-    int i;
-    for (i = index; i < num_clients - 1; i++)
-    {
-        clients[i] = clients[i + 1];
-    }
-    clients[num_clients - 1] = NULL;
-}
 void *read_data(void *arg)
 {
     struct connection_data *con = arg;
@@ -395,10 +385,10 @@ void *read_data(void *arg)
             name = strtok(NULL, "|");
             name = strtok(NULL, "|"); 
             write(con->fd, "WAIT|0|\n", 8);
-            con->active = true;
+            con->active = 1;
             num_active++;
             con->name = malloc(strlen(name) + 1);
-            con->name = strcpy(con->name, name);
+            strcpy(con->name, name);
             if (num_active > 0 && (num_active % 2 == 0))
             {
 
@@ -407,20 +397,26 @@ void *read_data(void *arg)
                 sigset_t mask;
                 //find the pair of clients that are active
                 int *pair = find_pair(clients, num_clients);
-                struct connection_data *client_a = clients[pair[0]];
-                struct connection_data *client_b = clients[pair[1]];
-                // create a new thread for the client pair
                 // make the client A's role "X" which is 1 and client B's role "O" which is 2
-                client_a->role = 1;
-                client_b->role = 2;
+                (clients[pair[0]])->role = 1;
+                (clients[pair[1]])->role = 2;
+                //make them not active
+                (clients[pair[0]])->active = 0;
+                (clients[pair[1]])->active = 0;
+                struct connection_data *client_a = malloc(sizeof(struct connection_data));
+                struct connection_data *client_b = malloc(sizeof(struct connection_data));
+                char *name_a = malloc(strlen((clients[pair[0]])->name) + 1);
+                char *name_b = malloc(strlen((clients[pair[1]])->name) + 1);
+                strcpy(name_a, (clients[pair[0]])->name);
+                strcpy(name_b, (clients[pair[1]])->name);
+                memcpy(client_a, clients[pair[0]], sizeof(struct connection_data));
+                memcpy(client_b, clients[pair[1]], sizeof(struct connection_data));
+                client_a->name = name_a;
+                client_b->name = name_b;
                 struct thread_data *thread_data = malloc(sizeof(struct thread_data));
                 thread_data->client_a = client_a;
                 thread_data->client_b = client_b;
                 printf("Creating new thread for client pair\n");
-                // remove the clients from the list
-                remove_client(clients, num_clients, pair[0]);
-                remove_client(clients, num_clients, pair[1]);
-                num_clients -= 2;
                 num_active -= 2;
                 free(pair);
                 error = pthread_create(&tid, NULL, game, thread_data);
@@ -434,9 +430,6 @@ void *read_data(void *arg)
                     free(thread_data);
                     continue;
                 }
-
-                
-
                 // automatically clean up the thread once it terminates
                 pthread_detach(tid);
                 // unblock handled signals
@@ -467,7 +460,6 @@ void *read_data(void *arg)
         printf("[%s:%s] terminating\n", host, port);
     }
     close(con->fd);
-    free(con);
     return NULL;
 }
 
@@ -531,13 +523,15 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
     }
-    // clean up any remaining clients
+    // free the list of clients
     for (int i = 0; i < num_clients; i++)
     {
-        close(clients[i]->fd);
-        free(clients[i]);
+        if(clients[i]->name != NULL)
+        {
+            free(clients[i]->name);
+            free(clients[i]);
+        }
     }
-
     puts("Shutting down");
     close(listener);
     return EXIT_SUCCESS;
