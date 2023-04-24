@@ -158,10 +158,20 @@ char gameOver() // returns 'X', 'O', 'T', or '.' if game is not over
 #define HOSTSIZE 100
 #define PORTSIZE 10
 void *game(void *arg)
-{
+{// arg 
     struct thread_data *data = arg;
-    struct connection_data *client_a = data->client_a;
-    struct connection_data *client_b = data->client_b;
+    // get client data
+    struct connection_data *old_client_a = data->client_a;
+    struct connection_data *old_client_b = data->client_b;
+    // free the old clients and set the new ones
+    struct connection_data *client_a = malloc(sizeof(struct connection_data));
+    struct connection_data *client_b = malloc(sizeof(struct connection_data));
+    memcpy(client_a, old_client_a, sizeof(struct connection_data));
+    memcpy(client_b, old_client_b, sizeof(struct connection_data));
+    free(old_client_a);
+    free(old_client_b);
+    free(data);
+
     char buf[BUFSIZE + 1], host_a[HOSTSIZE], port_a[PORTSIZE], host_b[HOSTSIZE], port_b[PORTSIZE];
     int bytes_a, bytes_b, client_a_err, client_b_err;
     printf("Game started between %s and %s\n", client_a->name, client_b->name);
@@ -341,24 +351,12 @@ void *read_data(void *arg)
         if (strncmp(buf, "PLAY", 4) == 0)
         {
             // send "NAME|(num_bytes)|(given name)|\n"
-            char *name = strtok(buf, "|");
+            char *name = strtok(buf, "|"); 
             name = strtok(NULL, "|");
-            name = strtok(NULL, "|");
-            char *num_bytes = malloc(sizeof(char) * 10);
-            sprintf(num_bytes, "%ld", strlen(name) + 1);
-            char *send_name = malloc(sizeof(char) * (strlen(num_bytes) + strlen(name) + 10));
-            strcpy(send_name, "NAME|");
-            strcat(send_name, num_bytes);
-            strcat(send_name, "|");
-            strcat(send_name, name);
-            strcat(send_name, "|\n");
-            write(con->fd, send_name, strlen(send_name));
-            free(num_bytes);
-            free(send_name);
+            name = strtok(NULL, "|"); 
             write(con->fd, "WAIT|0|\n", 8);
             con->active = true;
             num_active++;
-            // name assign to connection
             con->name = name;
             if (num_active > 0 && (num_active % 2 == 0))
             {
@@ -369,8 +367,6 @@ void *read_data(void *arg)
                 struct connection_data *client_a = clients[num_clients - 2];
                 struct connection_data *client_b = clients[num_clients - 1];
                 // create a new thread for the client pair
-                // print names of clinets
-                printf("Client A: %s Client B: %s \n", client_a->name, client_b->name);
                 // make the client A's role "X" which is 1 and client B's role "O" which is 2
                 client_a->role = 1;
                 client_b->role = 2;
@@ -397,7 +393,6 @@ void *read_data(void *arg)
 
                 // automatically clean up the thread once it terminates
                 pthread_detach(tid);
-                free(thread_data);
                 // unblock handled signals
                 error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
                 if (error != 0)
@@ -469,7 +464,7 @@ int main(int argc, char **argv)
             exit(EXIT_FAILURE);
         }
 
-        // add the client to the linked list
+        // add the client to the array
         clients[num_clients++] = con;
         error = pthread_create(&tid, NULL, read_data, con);
         if (error != 0)
