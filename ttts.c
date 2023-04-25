@@ -12,13 +12,13 @@
 #include <pthread.h>
 #include <errno.h>
 #include <sys/select.h>
+#include <ctype.h>
 
 #define QUEUE_SIZE 8
 #define MAX_CLIENTS 16
 volatile int active = 1;
 int num_active = 0;
 int num_clients = 0;
-int * gameBoard;
 void handler(int signum)
 {
     active = 0;
@@ -104,18 +104,8 @@ int open_listener(char *service, int queue_size)
     return sock;
 }
 
-// initialize game board
-void initBoard()
-{
-    gameBoard = malloc(9 * sizeof(char));
-    for (int i = 0; i < 9; i++)
-    {
-        gameBoard[i] = '.';
-    }
-}
-
 // make a function that checks if the game is over
-char gameOver() // returns 'X', 'O', 'T', or '.' if game is not over
+char gameOver(char *gameBoard) // returns 'X', 'O', 'T', or '.' if game is not over
 {
     // check rows
     for (int i = 0; i < 9; i += 3)
@@ -152,13 +142,121 @@ char gameOver() // returns 'X', 'O', 'T', or '.' if game is not over
     }
     return '.';
 }
+// check if the protocol is valid
+int isValid(char *msg, int roleA, struct connection_data *client, char *board)
+{
+    if (strncmp(msg, "RSGN", 4) == 0 || strncmp(msg, "MOVE", 4) == 0 || strncmp(msg, "DRAW", 4) == 0)
+    {
+        // send "NAME|(num_bytes)|(given name)|\n"
+        // send the rest of the message to a function to check for error handling
+        int numBytes = 0;
+        int msg_error = sscanf(msg, "%*[^|]|%d|", &numBytes);
+        int numDigits = 0;
+        int temp = numBytes;
+        while (temp != 0)
+        {
+            temp /= 10;
+            numDigits++;
+        }
+        if (strncmp(msg, "RSGN", 4) == 0 && !(msg_error != 1))
+        {
+            if (numBytes != 0)
+            {
+                printf("Error: invalid message1\n");
+                return 0;
+            }
+            if (strlen(msg) - 1 != 7)
+            {
+                printf("Error: invalid message3\n");
+                return 0;
+            }
+            return 1;
+        }
+        if (msg_error != 1)
+        {
+            printf("Error: invalid message1\n");
+            return 0;
+        }
+        else if (strlen(msg) - 1 != (6 + numDigits + numBytes))
+        {
+            printf("Error: invalid message2\n");
+            return 0;
+        }
 
+        // Check if the message ends with a pipe character
+        else if (msg[strlen(msg) - 2] != '|')
+        {
+            printf("Error: invalid message3\n");
+            return 0;
+        }
+        if (strncmp(msg, "MOVE", 4) == 0)
+        {
+            // Extract information from the MOVE message
+            int numBytes2 = 0;
+            char role;
+            int roleA;
+            int x, y;
+            int parsed = sscanf(msg, "%*[^|]|%d|%c|%d,%d|", &numBytes2, &role, &x, &y);
+            if (parsed != 4 || (role != 'X' && role != 'O') || x < 1 || x > 3 || y < 1 || y > 3)
+            {
+                printf("Error: invalid message4\n");
+                return 0;
+            }
+            if (role == 'X')
+            {
+                roleA = 1;
+            }
+            else
+            {
+                roleA = 2;
+            }
+            // check if the client's role matches the role in the message
+            if (client->role != roleA)
+            {
+                printf("Error: invalid message5\n");
+                return 0;
+            }
+            // Check if the move is valid
+            int index = (x - 1) * 3 + (y - 1);
+            if (board[index] != '.')
+            {
+                printf("Error: invalid message6\n");
+                return 0;
+            }
+        }
+        if (strncmp(msg, "DRAW", 4) == 0)
+        {
+            int numBytes2 = 0;
+            if (strlen(msg) - 1 != 9)
+            {
+                printf("Error: invalid message7\n");
+                return 0;
+            }
+            if (numBytes != 2)
+            {
+                printf("Error: invalid message8\n");
+                return 0;
+            }
+            char c;
+            int cerr = sscanf(msg, "%*[^|]|%d|%c|", &numBytes2, &c);
+            printf("%d\n", cerr);
+            printf("%c\n", c);
+            if (cerr != 2 && (c != 'S' || c != 'R' || c != 'A'))
+            {
+                printf("Error: invalid message9\n");
+                return 0;
+            }
+            return 1;
+        }
+    }
+    return 1;
+}
 
 #define BUFSIZE 256
 #define HOSTSIZE 100
 #define PORTSIZE 10
 void *game(void *arg)
-{// arg 
+{ // arg
     struct thread_data *data = arg;
     // get client data
     struct connection_data *old_client_a = data->client_a;
@@ -208,7 +306,7 @@ void *game(void *arg)
     int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
     // send (BEGN|numOfBytes|player's Role| client name) to both clients
     char *msgA = malloc(100);
-    int len = strlen(name_b) + 1 + 1 + 1 ;
+    int len = strlen(name_b) + 1 + 1 + 1;
     char role;
     if (client_a->role == 1)
         role = 'X';
@@ -235,7 +333,12 @@ void *game(void *arg)
         fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
     }
     free(msgB);
-
+    // initialize the game board
+    char gameBoard[9];
+    for (int i = 0; i < 9; i++)
+    {
+        gameBoard[i] = '.';
+    }
     FD_SET(client_a->fd, &read_fds);
     FD_SET(client_b->fd, &read_fds);
     // print the connection information
@@ -268,7 +371,12 @@ void *game(void *arg)
                 break;
             }
             buf[bytes_a] = '\0';
-            printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
+            // check if the message is valid
+            int isValA = isValid(buf, bytes_a, client_a, gameBoard);
+            if (isValA)
+                printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
+            else
+                printf("not valid message\n");
             // Send message from client A to client B and client A
             bytes_b = write(client_b->fd, buf, bytes_a);
             if (bytes_b == -1)
@@ -328,8 +436,8 @@ void *game(void *arg)
     free(client_b);
     return NULL;
 }
-// find the first pair of indexes of clients that are active 
-int * find_pair(struct connection_data *clients[], int num_clients)
+// find the first pair of indexes of clients that are active
+int *find_pair(struct connection_data *clients[], int num_clients)
 {
     int *pair = malloc(2 * sizeof(int));
     int i, j;
@@ -350,7 +458,7 @@ int * find_pair(struct connection_data *clients[], int num_clients)
     }
     return NULL;
 }
-// removes the given index of the client array and shifts the rest of the array 
+// removes the given index of the client array and shifts the rest of the array
 void *read_data(void *arg)
 {
     struct connection_data *con = arg;
@@ -376,59 +484,90 @@ void *read_data(void *arg)
         if (strncmp(buf, "PLAY", 4) == 0)
         {
             // send "NAME|(num_bytes)|(given name)|\n"
-            char *name = strtok(buf, "|"); 
-            name = strtok(NULL, "|");
-            name = strtok(NULL, "|"); 
-            write(con->fd, "WAIT|0|\n", 8);
-            con->active = 1;
-            num_active++;
-            strcpy(con->name, name);
-            if (num_active > 0 && (num_active % 2 == 0))
+            // send the rest of the message to a function to check for error handling
+            int numBytes = 0;
+            int msg_error = sscanf(buf, "%*[^|]|%d|", &numBytes);
+            int numDigits = 0;
+            int temp = numBytes;
+            while (temp != 0)
             {
-
-                pthread_t tid;
-                int error;
-                sigset_t mask;
-                //find the pair of clients that are active
-                int *pair = find_pair(clients, num_clients);
-                // make the client A's role "X" which is 1 and client B's role "O" which is 2
-                (clients[pair[0]])->role = 1;
-                (clients[pair[1]])->role = 2;
-                //make them not active
-                (clients[pair[0]])->active = 0;
-                (clients[pair[1]])->active = 0;
-                struct connection_data *client_a = malloc(sizeof(struct connection_data));
-                struct connection_data *client_b = malloc(sizeof(struct connection_data));
-                memcpy(client_a, clients[pair[0]], sizeof(struct connection_data));
-                memcpy(client_b, clients[pair[1]], sizeof(struct connection_data));
-                struct thread_data *thread_data = malloc(sizeof(struct thread_data));
-                thread_data->client_a = client_a;
-                thread_data->client_b = client_b;
-                printf("Creating new thread for client pair\n");
-                num_active -= 2;
-                free(pair);
-                error = pthread_create(&tid, NULL, game, thread_data);
-                if (error != 0)
-                {
-                    fprintf(stderr, "pthread_create: %s\n", strerror(error));
-                    close(client_a->fd);
-                    close(client_b->fd);
-                    free(client_a);
-                    free(client_b);
-                    free(thread_data);
-                    continue;
-                }
-                // automatically clean up the thread once it terminates
-                pthread_detach(tid);
-                // unblock handled signals
-                error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-                if (error != 0)
-                {
-                    fprintf(stderr, "sigmask: %s\n", strerror(error));
-                    exit(EXIT_FAILURE);
-                }
+                temp /= 10;
+                numDigits++;
             }
-            return NULL;
+            if (msg_error != 1)
+            {
+                printf("Invalid message: missing or invalid byte count\n");
+                write(con->fd, "EROR|0|ERROR A\n", 15);
+            }
+            else if (strlen(buf) - 1 != (6 + numDigits + numBytes))
+            {
+                // print numdigits
+                printf("numDigits: %d\n", numDigits);
+                printf("Invalid message: byte count mismatch (expected %d, got %ld)\n", numBytes, strlen(buf) - (6 + numDigits));
+                write(con->fd, "EROR|0|ERROR B\n", 15);
+            }
+
+            // Check if the message ends with a pipe character
+            else if (buf[strlen(buf) - 2] != '|')
+            {
+                printf("Invalid message: missing pipe character at the end\n");
+                write(con->fd, "EROR|0|ERROR C\n", 16);
+            }
+            else
+            {
+                char *name = strtok(buf, "|");
+                name = strtok(NULL, "|");
+                name = strtok(NULL, "|");
+                write(con->fd, "WAIT|0|\n", 8);
+                con->active = 1;
+                num_active++;
+                strcpy(con->name, name);
+                if (num_active > 0 && (num_active % 2 == 0))
+                {
+                    pthread_t tid;
+                    int error;
+                    sigset_t mask;
+                    // find the pair of clients that are active
+                    int *pair = find_pair(clients, num_clients);
+                    // make the client A's role "X" which is 1 and client B's role "O" which is 2
+                    (clients[pair[0]])->role = 1;
+                    (clients[pair[1]])->role = 2;
+                    // make them not active
+                    (clients[pair[0]])->active = 0;
+                    (clients[pair[1]])->active = 0;
+                    struct connection_data *client_a = malloc(sizeof(struct connection_data));
+                    struct connection_data *client_b = malloc(sizeof(struct connection_data));
+                    memcpy(client_a, clients[pair[0]], sizeof(struct connection_data));
+                    memcpy(client_b, clients[pair[1]], sizeof(struct connection_data));
+                    struct thread_data *thread_data = malloc(sizeof(struct thread_data));
+                    thread_data->client_a = client_a;
+                    thread_data->client_b = client_b;
+                    printf("Creating new thread for client pair\n");
+                    num_active -= 2;
+                    free(pair);
+                    error = pthread_create(&tid, NULL, game, thread_data);
+                    if (error != 0)
+                    {
+                        fprintf(stderr, "pthread_create: %s\n", strerror(error));
+                        close(client_a->fd);
+                        close(client_b->fd);
+                        free(client_a);
+                        free(client_b);
+                        free(thread_data);
+                        continue;
+                    }
+                    // automatically clean up the thread once it terminates
+                    pthread_detach(tid);
+                    // unblock handled signals
+                    error = pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+                    if (error != 0)
+                    {
+                        fprintf(stderr, "sigmask: %s\n", strerror(error));
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                return NULL;
+            }
         }
         else
         {
