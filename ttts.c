@@ -148,7 +148,7 @@ char gameOver(char *gameBoard) // returns 'X', 'O', 'D', or '.' if game is not o
     return '.';
 }
 // check if the protocol is valid
-int isValid(char *msg, int roleA, struct connection_data *client, char board[], int *isDraw)
+int isValid(char *msg, struct connection_data *client, char board[], int *isDraw)
 {
     if (strncmp(msg, "RSGN", 4) == 0 || strncmp(msg, "MOVE", 4) == 0 || strncmp(msg, "DRAW", 4) == 0)
     {
@@ -258,10 +258,10 @@ int isValid(char *msg, int roleA, struct connection_data *client, char board[], 
             }
             char c;
             int cerr = sscanf(msg, "%*[^|]|%d|%c|", &numBytes2, &c);
-            printf("%d\n", cerr);
-            printf("%c\n", c);
-            if (cerr != 2 && (c == 'S' || c == 'R' || c == 'A'))
+            if (cerr == 2 && (c == 'S' || c == 'R' || c == 'A'))
             {
+                printf("lolll\n");
+                printf("%d\n", *isDraw);
                 if (*isDraw == 1 && (c == 'S'))
                 {
                     printf("Error: invalid message9\n");
@@ -275,10 +275,13 @@ int isValid(char *msg, int roleA, struct connection_data *client, char board[], 
                 else if (*isDraw == 0 && c == 'S')
                 {
                     *isDraw = 1;
+                    printf("%d\n", *isDraw);
                 }
                 else if (*isDraw == 1 && (c == 'R' || c == 'A'))
                 {
                     *isDraw = 0;
+                    printf("%d\n", *isDraw);
+                    return 1;
                 }
             }
             return 1;
@@ -425,7 +428,7 @@ void *game(void *arg)
             buf[bytes_a] = '\0';
             // check if the message is valid
 
-            int isValA = isValid(buf, bytes_a, moving_client, gameBoard, &isDraw);
+            int isValA = isValid(buf, moving_client, gameBoard, &isDraw);
             printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
             if (isValA != 0)
             {
@@ -505,10 +508,11 @@ void *game(void *arg)
                     }
                     else
                     {
-                        if (buf[8] == 'R')
+                        if (buf[7] == 'R')
                         {
                             sprintf(msg, "DRAW|2|R|\n");
                             write(waiting_client->fd, msg, strlen(msg));
+                            isDraw = 0;
                         }
                         else
                         {
@@ -572,6 +576,47 @@ void *game(void *arg)
             }
             buf[bytes_b] = '\0';
             printf("[%s:%s] read %d bytes |%s|\n", host_b, port_b, bytes_b, buf);
+            // check if the waiting client wants to draw or resign
+            if (strncmp(buf,"DRAW",4) == 0 || strncmp(buf,"RSGN",4)==0){
+                int isValB = isValid(buf, waiting_client, gameBoard, &isDraw);
+                char msg[256];
+                if (isValB == 1)
+                {
+                    if (strncmp(buf, "DRAW", 4) == 0)
+                    {
+                        if (isDraw == 1)
+                        {
+                            sprintf(msg, "DRAW|2|S|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                        }
+                        else
+                        {
+                            if (buf[7] == 'R')
+                            {
+                                sprintf(msg, "DRAW|2|R|\n");
+                                write(moving_client->fd, msg, strlen(msg));
+                                isDraw = 0;
+                            }
+                            else
+                            {
+                                sprintf(msg, "OVER|28|D|The game ended in a draw.|\n");
+                                write(moving_client->fd, msg, strlen(msg));
+                                write(waiting_client->fd, msg, strlen(msg));
+                                break;
+                            }
+                        }
+                    }
+                    else if (strncmp(buf, "RSGN", 4) == 0)
+                    {
+                        sprintf(msg, "OVER|16|L|You resigned.|\n");
+                        write(waiting_client->fd, msg, strlen(msg));
+                        int length = strlen(waiting_client->name) + 17;
+                        sprintf(msg, "OVER|%d|W|%s has resigned.|\n", length, waiting_client->name);
+                        write(moving_client->fd, msg, strlen(msg));
+                        break;
+                    }
+                }
+            }
             char *msg = malloc(100);
             sprintf(msg, "INVD|15|Not your turn|\n");
             bytes_b = write(waiting_client->fd, msg, strlen(msg));
@@ -653,13 +698,13 @@ void *read_data(void *arg)
                 printf("Invalid message: missing or invalid byte count\n");
                 char msg[100];
                 sprintf(msg, "INVL|17|Invalid command.|\n");
-                write(con->fd, msg, strleng(msg));
+                write(con->fd, msg, strlen(msg));
             }
             else if (strlen(buf) - 1 != (6 + numDigits + numBytes))
             {
                 char msg[100];
                 sprintf(msg, "INVL|17|Invalid command.|\n");
-                write(con->fd, msg, strleng(msg));
+                write(con->fd, msg, strlen(msg));
             }
 
             // Check if the message ends with a pipe character
@@ -667,7 +712,7 @@ void *read_data(void *arg)
             {
                 char msg[100];
                 sprintf(msg, "INVL|17|Invalid command.|\n");
-                write(con->fd, msg, strleng(msg));
+                write(con->fd, msg, strlen(msg));
             }
             else
             {
