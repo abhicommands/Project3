@@ -105,7 +105,7 @@ int open_listener(char *service, int queue_size)
 }
 
 // make a function that checks if the game is over
-char gameOver(char *gameBoard) // returns 'X', 'O', 'T', or '.' if game is not over
+char gameOver(char *gameBoard) // returns 'X', 'O', 'D', or '.' if game is not over
 {
     // check rows
     for (int i = 0; i < 9; i += 3)
@@ -133,17 +133,22 @@ char gameOver(char *gameBoard) // returns 'X', 'O', 'T', or '.' if game is not o
         return gameBoard[2];
     }
     // check if board is full
+    int count = 0;
     for (int i = 0; i < 9; i++)
     {
         if (gameBoard[i] != '.')
         {
-            return 'T';
+            count++;
         }
+    }
+    if (count == 9)
+    {
+        return 'D';
     }
     return '.';
 }
 // check if the protocol is valid
-int isValid(char *msg, int roleA, struct connection_data *client, char *board)
+int isValid(char *msg, int roleA, struct connection_data *client, char board[], int *isDraw)
 {
     if (strncmp(msg, "RSGN", 4) == 0 || strncmp(msg, "MOVE", 4) == 0 || strncmp(msg, "DRAW", 4) == 0)
     {
@@ -162,12 +167,12 @@ int isValid(char *msg, int roleA, struct connection_data *client, char *board)
         {
             if (numBytes != 0)
             {
-                printf("Error: invalid message1\n");
+                printf("Error: invalid message10\n");
                 return 0;
             }
             if (strlen(msg) - 1 != 7)
             {
-                printf("Error: invalid message3\n");
+                printf("Error: invalid message30\n");
                 return 0;
             }
             return 1;
@@ -197,10 +202,15 @@ int isValid(char *msg, int roleA, struct connection_data *client, char *board)
             int roleA;
             int x, y;
             int parsed = sscanf(msg, "%*[^|]|%d|%c|%d,%d|", &numBytes2, &role, &x, &y);
-            if (parsed != 4 || (role != 'X' && role != 'O') || x < 1 || x > 3 || y < 1 || y > 3)
+            if (parsed != 4 || (role != 'X' && role != 'O'))
             {
-                printf("Error: invalid message4\n");
+                printf("Error: INVD\n");
                 return 0;
+            }
+            if (x < 1 || x > 3 || y < 1 || y > 3)
+            {
+                printf("Error: position out of bounds\n");
+                return 4;
             }
             if (role == 'X')
             {
@@ -213,16 +223,25 @@ int isValid(char *msg, int roleA, struct connection_data *client, char *board)
             // check if the client's role matches the role in the message
             if (client->role != roleA)
             {
-                printf("Error: invalid message5\n");
-                return 0;
+                printf("Error: Its not your role\n");
+                return 2;
             }
             // Check if the move is valid
             int index = (x - 1) * 3 + (y - 1);
             if (board[index] != '.')
             {
-                printf("Error: invalid message6\n");
-                return 0;
+                printf("Error: position occupied\n");
+                return 3;
             }
+            if (client->role == 1)
+            {
+                board[index] = 'X';
+            }
+            else
+            {
+                board[index] = 'O';
+            }
+            return 1;
         }
         if (strncmp(msg, "DRAW", 4) == 0)
         {
@@ -241,15 +260,31 @@ int isValid(char *msg, int roleA, struct connection_data *client, char *board)
             int cerr = sscanf(msg, "%*[^|]|%d|%c|", &numBytes2, &c);
             printf("%d\n", cerr);
             printf("%c\n", c);
-            if (cerr != 2 && (c != 'S' || c != 'R' || c != 'A'))
+            if (cerr != 2 && (c == 'S' || c == 'R' || c == 'A'))
             {
-                printf("Error: invalid message9\n");
-                return 0;
+                if (*isDraw == 1 && (c == 'S'))
+                {
+                    printf("Error: invalid message9\n");
+                    return 0;
+                }
+                else if (*isDraw == 0 && (c == 'R' || c == 'A'))
+                {
+                    printf("Error: invalid message9\n");
+                    return 0;
+                }
+                else if (*isDraw == 0 && c == 'S')
+                {
+                    *isDraw = 1;
+                }
+                else if (*isDraw == 1 && (c == 'R' || c == 'A'))
+                {
+                    *isDraw = 0;
+                }
             }
             return 1;
         }
     }
-    return 1;
+    return 0;
 }
 
 #define BUFSIZE 256
@@ -304,14 +339,25 @@ void *game(void *arg)
     FD_SET(client_b->fd, &write_fds);
 
     int max_fd = (client_a->fd > client_b->fd) ? client_a->fd : client_b->fd;
+    struct connection_data *moving_client = NULL;
+    struct connection_data *waiting_client = NULL;
+    struct connection_data *temp;
     // send (BEGN|numOfBytes|player's Role| client name) to both clients
     char *msgA = malloc(100);
     int len = strlen(name_b) + 1 + 1 + 1;
     char role;
     if (client_a->role == 1)
+    {
         role = 'X';
+        moving_client = client_a;
+        waiting_client = client_b;
+    }
     else
+    {
         role = 'O';
+        moving_client = client_b;
+        waiting_client = client_a;
+    }
     sprintf(msgA, "BEGN|%d|%c|%s|\n", len, role, name_b);
     bytes_a = write(client_a->fd, msgA, strlen(msgA));
     if (bytes_a == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
@@ -339,10 +385,13 @@ void *game(void *arg)
     {
         gameBoard[i] = '.';
     }
-    FD_SET(client_a->fd, &read_fds);
-    FD_SET(client_b->fd, &read_fds);
+    // FD_set the moving client and write INVD if the other client says something
+    FD_SET(moving_client->fd, &read_fds);
+    FD_SET(waiting_client->fd, &read_fds);
+    printf("moving client is %s and waiting client is %s\n", moving_client->name, waiting_client->name);
     // print the connection information
     printf("Game started between %s:%s and %s:%s\n", host_a, port_a, host_b, port_b);
+    int isDraw = 0;
     while (active)
     {
         fd_set tmp_read_fds = read_fds;
@@ -353,11 +402,10 @@ void *game(void *arg)
             fprintf(stderr, "select: %s\n", strerror(errno));
             break;
         }
-
-        // Check for data to read from client A
-        if (FD_ISSET(client_a->fd, &tmp_read_fds))
+        // check for data from the moving client
+        if (FD_ISSET(moving_client->fd, &tmp_read_fds))
         {
-            bytes_a = read(client_a->fd, buf, BUFSIZE);
+            bytes_a = read(moving_client->fd, buf, BUFSIZE); // read message from the moving client
             if (bytes_a == -1)
             {
                 fprintf(stderr, "[%s:%s] read: %s\n", host_a, port_a, strerror(errno));
@@ -365,6 +413,10 @@ void *game(void *arg)
             }
             if (bytes_a == 0)
             {
+                //write the other client that the connection is closed
+                char msg[256];
+                sprintf(msg, "OVER|31|Connection with opponent lost.|\n");
+                write(waiting_client->fd, msg, strlen(msg));
                 printf("Closing connection between [%s:%s] and [%s:%s]\n", host_a, port_a, host_b, port_b);
                 FD_CLR(client_a->fd, &read_fds);
                 FD_CLR(client_b->fd, &write_fds);
@@ -372,32 +424,137 @@ void *game(void *arg)
             }
             buf[bytes_a] = '\0';
             // check if the message is valid
-            int isValA = isValid(buf, bytes_a, client_a, gameBoard);
-            if (isValA)
-                printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
-            else
-                printf("not valid message\n");
-            // Send message from client A to client B and client A
-            bytes_b = write(client_b->fd, buf, bytes_a);
-            if (bytes_b == -1)
-            {
-                fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
-                break;
-            }
-            bytes_a = write(client_a->fd, buf, bytes_a); // added line to send message back to client A
-            if (bytes_a == -1)
-            {
-                fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
-                break;
-            }
-            // FD_CLR(client_a->fd, &read_fds);
-            FD_SET(client_b->fd, &write_fds);
-        }
 
-        // Check for data to read from client B
-        if (FD_ISSET(client_b->fd, &tmp_read_fds))
+            int isValA = isValid(buf, bytes_a, moving_client, gameBoard, &isDraw);
+            printf("[%s:%s] read %d bytes |%s|\n", host_a, port_a, bytes_a, buf);
+            if (isValA != 0)
+            {
+
+                // send the message to the waiting client and the moving client in this specific format MOVD|16|X|2,2|....X....|
+                char msg[256];
+                if (strncmp(buf, "MOVE", 4) == 0)
+                {
+                    if (isValA > 1)
+                    {
+                        if (isValA == 2)
+                        {
+                            sprintf(msg, "INVL|15|Not your role.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                        }
+                        if (isValA == 3)
+                        {
+                            sprintf(msg, "INVL|24|That space is occupied.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                        }
+                        if (isValA == 4)
+                        {
+                            sprintf(msg, "INVL|27|Position is out of bounds.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                        }
+                    }
+                    else
+                    {
+                        char board[10];
+                        for (int i = 0; i < 9; i++)
+                        {
+                            board[i] = gameBoard[i];
+                        }
+                        board[9] = '\0';
+                        char movingRole;
+                        if (moving_client->role == 1)
+                            movingRole = 'X';
+                        else
+                            movingRole = 'O';
+                        sprintf(msg, "MOVD|16|%c|%s|\n", movingRole, board);
+                        write(moving_client->fd, msg, strlen(msg));
+                        write(waiting_client->fd, msg, strlen(msg));
+
+                        // check if the game is over
+                        char isOver = gameOver(gameBoard);
+                        if (isOver == 'X')
+                        {
+                            sprintf(msg, "OVER|11|X|You won.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                            sprintf(msg, "OVER|12|L|You lost.|\n");
+                            write(waiting_client->fd, msg, strlen(msg));
+                            break;
+                        }
+                        else if (isOver == 'O')
+                        {
+                            sprintf(msg, "OVER|11|O|You won.|\n");
+                            write(waiting_client->fd, msg, strlen(msg));
+                            sprintf(msg, "OVER|12|L|You lost.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                            break;
+                        }
+                        else if (isOver == 'D')
+                        {
+                            sprintf(msg, "OVER|28|D|The game ended in a draw.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                            write(waiting_client->fd, msg, strlen(msg));
+                            break;
+                        }
+                    }
+                }
+                else if (strncmp(buf, "DRAW", 4) == 0)
+                {
+                    if (isDraw == 1)
+                    {
+                        sprintf(msg, "DRAW|2|S|\n");
+                        write(waiting_client->fd, msg, strlen(msg));
+                    }
+                    else
+                    {
+                        if (buf[8] == 'R')
+                        {
+                            sprintf(msg, "DRAW|2|R|\n");
+                            write(waiting_client->fd, msg, strlen(msg));
+                        }
+                        else
+                        {
+                            sprintf(msg, "OVER|28|D|The game ended in a draw.|\n");
+                            write(moving_client->fd, msg, strlen(msg));
+                            write(waiting_client->fd, msg, strlen(msg));
+                            break;
+                        }
+                    }
+                }
+                else if (strncmp(buf, "RSGN", 4) == 0)
+                {
+                    sprintf(msg, "OVER|16|L|You resigned.|\n");
+                    write(moving_client->fd, msg, strlen(msg));
+                    int length = strlen(moving_client->name) + 17;
+                    sprintf(msg, "OVER|%d|W|%s has resigned.|\n", length, moving_client->name);
+                    write(waiting_client->fd, msg, strlen(msg));
+                    break;
+                }
+                if(isValA == 1)
+                {
+                    // swap the moving client and the waiting client
+                    temp = moving_client;
+                    moving_client = waiting_client;
+                    waiting_client = temp;
+                }
+                printf("moving client is %s and waiting client is %s\n", moving_client->name, waiting_client->name);
+            }
+            else
+            {
+                // send INVD to the moving client
+                char msg[100];
+                sprintf(msg, "INVL|17|Invalid command.|\n");
+                write(moving_client->fd, msg, strlen(msg));
+                sprintf(msg, "OVER|31|L|You put entered a bad command.|\n");
+                write(moving_client->fd, msg, strlen(msg));
+                sprintf(msg, "OVER|34|W|opponent entered a bad command.|\n");
+                write(waiting_client->fd, msg, strlen(msg));
+                break;
+            }
+            FD_SET(waiting_client->fd, &write_fds);
+        }
+        // check if waiting client says something if so, send INVD to the waiting client
+        else if (FD_ISSET(waiting_client->fd, &tmp_read_fds))
         {
-            bytes_b = read(client_b->fd, buf, BUFSIZE);
+            bytes_b = read(waiting_client->fd, buf, BUFSIZE);
             if (bytes_b == -1)
             {
                 fprintf(stderr, "[%s:%s] read: %s\n", host_b, port_b, strerror(errno));
@@ -405,29 +562,26 @@ void *game(void *arg)
             }
             if (bytes_b == 0)
             {
+                char msg[256];
+                sprintf(msg, "OVER|31|Connection with opponent lost.|\n");
+                write(moving_client->fd, msg, strlen(msg));
                 printf("Closing connection between [%s:%s] and [%s:%s]\n", host_a, port_a, host_b, port_b);
-                FD_CLR(client_b->fd, &read_fds);
-                FD_CLR(client_a->fd, &write_fds);
+                FD_CLR(client_a->fd, &read_fds);
+                FD_CLR(client_b->fd, &write_fds);
                 break;
             }
             buf[bytes_b] = '\0';
             printf("[%s:%s] read %d bytes |%s|\n", host_b, port_b, bytes_b, buf);
-            // Send message from client B to client A
-            bytes_a = write(client_a->fd, buf, bytes_b);
-            if (bytes_a == -1)
-            {
-                fprintf(stderr, "[%s:%s] write: %s\n", host_a, port_a, strerror(errno));
-                break;
-            }
-            bytes_b = write(client_b->fd, buf, bytes_b); // added line to send message back to client B
-            if (bytes_b == -1)
+            char *msg = malloc(100);
+            sprintf(msg, "INVD|15|Not your turn|\n");
+            bytes_b = write(waiting_client->fd, msg, strlen(msg));
+            if (bytes_b == -1 && errno != EAGAIN && errno != EWOULDBLOCK)
             {
                 fprintf(stderr, "[%s:%s] write: %s\n", host_b, port_b, strerror(errno));
-                break;
             }
-            // FD_CLR(client_b->fd, &read_fds);
-            FD_SET(client_a->fd, &write_fds);
+            free(msg);
         }
+        // switch the moving client and waiting client
     }
 
     close(client_a->fd);
@@ -497,28 +651,29 @@ void *read_data(void *arg)
             if (msg_error != 1)
             {
                 printf("Invalid message: missing or invalid byte count\n");
-                write(con->fd, "EROR|0|ERROR A\n", 15);
+                char msg[100];
+                sprintf(msg, "INVL|17|Invalid command.|\n");
+                write(con->fd, msg, strleng(msg));
             }
             else if (strlen(buf) - 1 != (6 + numDigits + numBytes))
             {
-                // print numdigits
-                printf("numDigits: %d\n", numDigits);
-                printf("Invalid message: byte count mismatch (expected %d, got %ld)\n", numBytes, strlen(buf) - (6 + numDigits));
-                write(con->fd, "EROR|0|ERROR B\n", 15);
+                char msg[100];
+                sprintf(msg, "INVL|17|Invalid command.|\n");
+                write(con->fd, msg, strleng(msg));
             }
 
             // Check if the message ends with a pipe character
             else if (buf[strlen(buf) - 2] != '|')
             {
-                printf("Invalid message: missing pipe character at the end\n");
-                write(con->fd, "EROR|0|ERROR C\n", 16);
+                char msg[100];
+                sprintf(msg, "INVL|17|Invalid command.|\n");
+                write(con->fd, msg, strleng(msg));
             }
             else
             {
                 char *name = strtok(buf, "|");
                 name = strtok(NULL, "|");
                 name = strtok(NULL, "|");
-                write(con->fd, "WAIT|0|\n", 8);
                 con->active = 1;
                 num_active++;
                 strcpy(con->name, name);
@@ -535,6 +690,20 @@ void *read_data(void *arg)
                     // make them not active
                     (clients[pair[0]])->active = 0;
                     (clients[pair[1]])->active = 0;
+                    // check if the names are the same and if they are, then send "EROR|0|ERROR D\n" to both clients and close the connection
+                    if (strcmp((clients[pair[0]])->name, (clients[pair[1]])->name) == 0)
+                    {
+                        // send same name error to client B
+                        printf("Same name error\n");
+                        char msg[100];
+                        sprintf(msg, "INVL|17|Invalid command.|\n");
+                        write((clients[pair[1]])->fd, msg, strlen(msg));
+                        close((clients[pair[1]])->fd);
+                        (clients[pair[0]])->active = 1;
+                        num_active--;
+                        free(pair);
+                        return NULL;
+                    }
                     struct connection_data *client_a = malloc(sizeof(struct connection_data));
                     struct connection_data *client_b = malloc(sizeof(struct connection_data));
                     memcpy(client_a, clients[pair[0]], sizeof(struct connection_data));
@@ -566,6 +735,7 @@ void *read_data(void *arg)
                         exit(EXIT_FAILURE);
                     }
                 }
+                write(con->fd, "WAIT|0|\n", 8);
                 return NULL;
             }
         }

@@ -30,3 +30,5 @@ If the move is valid the server then changes the game board and alerts both play
 If one of the players wants to DRAW then can suggest it when its their turn. Then the other player can accept or reject.
 When its their turn that player can also RSGN and end the game.
 Once the game has ended the server will send OVER and the outcome to the client.
+
+# Test plan
